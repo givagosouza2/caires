@@ -1,177 +1,111 @@
 import io
-import re
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Extrator de Blocos (F2:H6 e L2:S6)", layout="wide")
-st.title("Extrator de dados por condição (25 arquivos)")
+st.set_page_config(page_title="Juntar 25 condições", layout="wide")
+st.title("Extrair colunas por nome e juntar tudo em um arquivo")
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def col_letter_to_index(letter: str) -> int:
-    """Excel column letter (A, B, ..., Z, AA, AB, ...) -> 0-based index"""
-    letter = letter.strip().upper()
-    idx = 0
-    for ch in letter:
-        idx = idx * 26 + (ord(ch) - ord("A") + 1)
-    return idx - 1
-
-def extract_excel_like_range(df: pd.DataFrame, col_start: str, col_end: str, row_start: int, row_end: int, header_in_row1: bool = True):
-    """
-    Extrai um range no estilo Excel: colunas por letras (ex: F-H), linhas por números (ex: 2-6).
-
-    Se header_in_row1=True:
-      - Linha 1 é cabeçalho
-      - Linha 2 (Excel) corresponde à primeira linha de dados (iloc[0])
-    """
-    c0 = col_letter_to_index(col_start)
-    c1 = col_letter_to_index(col_end)
-
-    # Converter linhas Excel -> iloc
-    # Excel row 2 -> iloc 0 quando há cabeçalho na linha 1
-    offset = 2 if header_in_row1 else 1  # se há header, subtrai 2; se não, subtrai 1
-    r0 = row_start - offset
-    r1 = row_end - offset
-
-    # iloc end é exclusivo, então +1
-    return df.iloc[r0:r1 + 1, c0:c1 + 1]
+COLS_WANTED = [
+    "K",
+    "Início global (s)",
+    "Fim global (s)",
+    "Duração global (s)",
+    "Comp1 início (s)",
+    "Comp1 fim (s)",
+    "Comp1 duração (s)",
+    "Comp2 início (s)",
+    "Comp2 fim (s)",
+    "Comp2 duração (s)",
+]
 
 def read_any_table(uploaded_file) -> pd.DataFrame:
-    """Lê CSV ou Excel para DataFrame."""
     name = uploaded_file.name.lower()
-
     if name.endswith(".csv") or name.endswith(".txt"):
-        # utf-8-sig lida com BOM (comum em CSVs gerados por alguns softwares)
+        # utf-8-sig lida com BOM
         return pd.read_csv(uploaded_file, encoding="utf-8-sig")
     elif name.endswith(".xlsx") or name.endswith(".xlsm") or name.endswith(".xls"):
-        # para Excel: tenta primeira aba
         return pd.read_excel(uploaded_file, sheet_name=0, engine="openpyxl")
     else:
         raise ValueError(f"Formato não suportado: {uploaded_file.name}")
 
-def sanitize_condition_label(s: str) -> str:
-    s = s.strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
+def normalize_col(s: str) -> str:
+    """Normaliza para comparar nomes de colunas (remove espaços extras)."""
+    return " ".join(str(s).strip().split())
 
-# -----------------------------
-# UI - condições
-# -----------------------------
-st.sidebar.header("Configuração")
+def build_col_map(df: pd.DataFrame):
+    """Mapa: nome_normalizado -> nome_original"""
+    return {normalize_col(c): c for c in df.columns}
 
-default_conditions = "\n".join([f"Cond_{i:02d}" for i in range(1, 26)])
-conditions_text = st.sidebar.text_area(
-    "Lista de condições (1 por linha)",
-    value=default_conditions,
-    height=260
+st.info("Faça upload dos 25 arquivos (ou quantos quiser). O app vai extrair as colunas por nome e juntar tudo.")
+
+files = st.file_uploader(
+    "Arquivos (.csv, .txt, .xlsx, .xlsm, .xls)",
+    type=["csv", "txt", "xlsx", "xlsm", "xls"],
+    accept_multiple_files=True
 )
 
-header_in_row1 = st.sidebar.checkbox("Arquivo tem cabeçalho na linha 1 (recomendado)", value=True)
-
-conditions = [sanitize_condition_label(x) for x in conditions_text.splitlines() if x.strip()]
-if len(conditions) == 0:
-    st.warning("Informe pelo menos 1 condição na barra lateral.")
+if not files:
     st.stop()
 
-st.write(f"**Condições ativas:** {len(conditions)}")
+all_parts = []
+errors = []
 
-st.info("Para cada condição, faça upload do arquivo correspondente. Em seguida, clique em **Processar**.")
+for f in files:
+    try:
+        df = read_any_table(f)
 
-# Uploaders
-uploaded_by_condition = {}
-cols = st.columns(3)
-for i, cond in enumerate(conditions):
-    with cols[i % 3]:
-        uploaded_by_condition[cond] = st.file_uploader(
-            f"📄 {cond}",
-            type=["csv", "txt", "xlsx", "xlsm", "xls"],
-            key=f"uploader_{i}"
-        )
+        col_map = build_col_map(df)
+        wanted_norm = [normalize_col(c) for c in COLS_WANTED]
 
-# -----------------------------
-# Processamento
-# -----------------------------
-if st.button("🚀 Processar", type="primary"):
-    results_long = []   # formato longo: condition, block, row, col, value
-    results_wide = []   # formato largo: condition + colunas do bloco
-
-    errors = []
-
-    for cond, up in uploaded_by_condition.items():
-        if up is None:
+        missing = [COLS_WANTED[i] for i, wn in enumerate(wanted_norm) if wn not in col_map]
+        if missing:
+            errors.append((f.name, f"Faltando colunas: {missing}"))
             continue
 
-        try:
-            df = read_any_table(up)
+        # Seleciona mantendo nomes originais do arquivo
+        selected = df[[col_map[wn] for wn in wanted_norm]].copy()
 
-            # Extrair ranges
-            block1 = extract_excel_like_range(df, "F", "H", 2, 6, header_in_row1=header_in_row1)   # F2:H6
-            block2 = extract_excel_like_range(df, "L", "S", 2, 6, header_in_row1=header_in_row1)   # L2:S6
+        # Renomeia para os nomes padronizados (iguais para todos)
+        selected.columns = COLS_WANTED
 
-            # Guardar "wide" (mantendo colunas originais)
-            b1 = block1.copy()
-            b1.insert(0, "Condition", cond)
-            b1.insert(1, "Block", "F2:H6")
-            results_wide.append(b1)
+        # Rastreabilidade
+        selected.insert(0, "Arquivo", f.name)
 
-            b2 = block2.copy()
-            b2.insert(0, "Condition", cond)
-            b2.insert(1, "Block", "L2:S6")
-            results_wide.append(b2)
+        all_parts.append(selected)
 
-            # Guardar "long" (facilita estatística / filtros depois)
-            for block_name, block_df in [("F2:H6", block1), ("L2:S6", block2)]:
-                tmp = block_df.copy()
-                tmp["__row__"] = range(2, 2 + len(tmp))  # rotula como linhas Excel 2..6
-                tmp_long = tmp.melt(id_vars="__row__", var_name="Column", value_name="Value")
-                tmp_long.insert(0, "Condition", cond)
-                tmp_long.insert(1, "Block", block_name)
-                tmp_long = tmp_long.rename(columns={"__row__": "ExcelRow"})
-                results_long.append(tmp_long)
+    except Exception as e:
+        errors.append((f.name, str(e)))
 
-        except Exception as e:
-            errors.append((cond, up.name, str(e)))
+if errors:
+    st.error("Alguns arquivos não puderam ser processados:")
+    for fname, msg in errors:
+        st.write(f"- **{fname}**: {msg}")
 
-    if errors:
-        st.error("Alguns arquivos falharam ao processar:")
-        for cond, fname, msg in errors:
-            st.write(f"- **{cond}** ({fname}): {msg}")
+if not all_parts:
+    st.warning("Nenhum arquivo foi consolidado (todos falharam ou estavam sem as colunas).")
+    st.stop()
 
-    if not results_wide:
-        st.warning("Nenhum arquivo foi processado. Envie pelo menos 1 arquivo e tente novamente.")
-        st.stop()
+final_df = pd.concat(all_parts, ignore_index=True)
 
-    df_wide = pd.concat(results_wide, ignore_index=True)
-    df_long = pd.concat(results_long, ignore_index=True)
+st.success(f"Consolidado! Linhas totais: {len(final_df)} | Arquivos OK: {len(all_parts)}")
+st.dataframe(final_df, use_container_width=True)
 
-    st.success("Processamento concluído!")
+# Download CSV
+csv_bytes = final_df.to_csv(index=False).encode("utf-8-sig")
+st.download_button(
+    "⬇️ Baixar CSV consolidado",
+    data=csv_bytes,
+    file_name="consolidado_25_condicoes.csv",
+    mime="text/csv"
+)
 
-    tab1, tab2 = st.tabs(["📌 Preview (wide)", "🔎 Preview (long)"])
-
-    with tab1:
-        st.dataframe(df_wide, use_container_width=True)
-
-    with tab2:
-        st.dataframe(df_long, use_container_width=True)
-
-    # Exportar para Excel (2 abas)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_wide.to_excel(writer, index=False, sheet_name="wide_blocks")
-        df_long.to_excel(writer, index=False, sheet_name="long_blocks")
-
-    st.download_button(
-        "⬇️ Baixar resultado (Excel)",
-        data=output.getvalue(),
-        file_name="extracao_blocos_25condicoes.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    # Exportar também CSV do long (se quiser)
-    st.download_button(
-        "⬇️ Baixar resultado (CSV long)",
-        data=df_long.to_csv(index=False).encode("utf-8-sig"),
-        file_name="extracao_blocos_long.csv",
-        mime="text/csv"
-    )
+# Download Excel
+output = io.BytesIO()
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    final_df.to_excel(writer, index=False, sheet_name="consolidado")
+st.download_button(
+    "⬇️ Baixar Excel consolidado",
+    data=output.getvalue(),
+    file_name="consolidado_25_condicoes.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)

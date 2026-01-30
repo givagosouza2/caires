@@ -98,14 +98,3 @@ st.download_button(
     file_name="consolidado_25_condicoes.csv",
     mime="text/csv"
 )
-
-# Download Excel
-output = io.BytesIO()
-with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    final_df.to_excel(writer, index=False, sheet_name="consolidado")
-st.download_button(
-    "⬇️ Baixar Excel consolidado",
-    data=output.getvalue(),
-    file_name="consolidado_25_condicoes.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
